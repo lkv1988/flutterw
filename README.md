@@ -22,7 +22,7 @@ Download the `flutterw` into your project directory, and then make sure it has t
 ### Use
 
 - In CLI: execute the `flutterw` with the commands in flutter
-- In IDE: change the `Flutter SDK path` to ${HOME}/.flutterw/${VERSION}/flutter, it's the directory `fluttwe ` download special version into.
+- In IDE: change the `Flutter SDK path` to ${HOME}/.flutterw/${VERSION}/flutter, it's the directory `flutterw ` download special version into.
 
 ### About flutterw
 
