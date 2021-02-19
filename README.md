@@ -26,7 +26,7 @@ Download the `flutterw` into your project directory, and then make sure it has t
 
 ### About flutterw
 
-Inspired by `gradlew`, with `flutterw` we developers will never worry about the flutter environment any all.
+Inspired by `gradlew`, with `flutterw` we developers will never worry about the flutter environment at all.
 
 ### License
 
