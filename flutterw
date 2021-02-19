@@ -1,0 +1,306 @@
+#!/usr/bin/env python3
+
+import os
+import sys
+import os.path
+import urllib.request
+import json
+import subprocess
+import re
+import ssl
+import time
+import hashlib
+from zipfile import ZipFile, ZipInfo, is_zipfile
+
+ssl._create_default_https_context = ssl._create_unverified_context
+
+IS_DEBUG = False
+
+
+class ZipFileWithPerms(ZipFile):
+    def _extract_member(self, member, targetpath, pwd):
+        if not isinstance(member, ZipInfo):
+            member = self.getinfo(member)
+
+        targetpath = super()._extract_member(member, targetpath, pwd)
+
+        attr = member.external_attr >> 16
+        if attr != 0:
+            os.chmod(targetpath, attr)
+        return targetpath
+
+
+def printI(msg, end='\n'):
+    print(f'[FlutterW] >>> {msg}', end=end)
+
+
+def printD(msg):
+    if IS_DEBUG:
+        print(f'DEBUG >>> {msg}')
+
+
+class Downloader:
+
+    def __init__(self, url, sha256) -> None:
+        super().__init__()
+        self.url = url
+        self.sha256 = sha256
+
+    def _current_mills(self):
+        return round(time.time() * 1000)
+
+    def _verify(self, path):
+        printI('Verification...')
+        h = hashlib.sha256()
+        with open(path, 'rb') as zipf:
+            while True:
+                chunk = zipf.read(h.block_size)
+                if not chunk:
+                    break
+                h.update(chunk)
+        hashcode = h.hexdigest()
+        printD(hashcode)
+        if hashcode != self.sha256:
+            printI('Verification failed')
+            return False
+        printI('Verification success')
+        return True
+
+    def download(self):
+        resp = urllib.request.urlopen(self.url)
+        total_length = int(resp.headers['Content-Length'])
+        chunk_size = 4096
+        downloaded_length = 0
+        printI(f'Total size: {"%.1f" % (total_length / (1024 * 1024))}MB')
+        last_mark_time = self._current_mills()
+        tmp_total = 0
+        speed = 0
+        simple_name = self.url[str(self.url).rindex('/') + 1:]
+        download_tmp_name = f'/tmp/{simple_name}'
+        if os.path.exists(download_tmp_name) and os.path.isfile(download_tmp_name) \
+                and self._verify(download_tmp_name):
+            printI('The file already exist, no need to download again.')
+            return download_tmp_name
+        with open(download_tmp_name, mode='w+') as f:
+            while chunk_data := resp.read(chunk_size):
+                this_length = len(chunk_data)
+                downloaded_length += this_length
+                f.buffer.write(chunk_data)
+                tmp_total += this_length
+                cur = self._current_mills()
+                if cur - last_mark_time >= 1000:
+                    speed = tmp_total // 1024
+                    tmp_total = 0
+                    last_mark_time = cur
+                printI(f"\rSpeed: {speed}KB/s %.2f" % (downloaded_length * 100 / total_length) + "%", end='')
+                sys.stdout.flush()
+        printI('')
+        printI(f'Download finished.')
+        return download_tmp_name
+
+
+class Wrapper:
+    cfgs = {}
+    CN_HOST = 'https://storage.flutter-io.cn'
+    HOST = 'https://storage.googleapis.com'
+
+    SDK_KEY = 'sdk.version'
+
+    MY_HOME = ''
+
+    FOUNDED_FLUTTER_BIN = ''
+
+    def __init__(self, payload) -> None:
+        super().__init__()
+        self.MY_HOME = os.environ['HOME']
+        self.payload = payload
+        wrapper_home = f'{self.MY_HOME}/.flutterw'
+        if not os.path.exists(wrapper_home) or not os.path.isdir(wrapper_home):
+            os.makedirs(wrapper_home)
+        self.wrapper_home = wrapper_home
+
+    def _get_host(self):
+        if 'cn' in self.cfgs and self.cfgs['cn'] == 'true':
+            return self.CN_HOST
+        else:
+            return self.HOST
+
+    def _get_download_address(self, channel, platform, version):
+        return f'{self._get_host()}/flutter_infra/releases/{channel}/{platform}/flutter_{platform}_{version}-{channel}.zip'
+
+    def _get_version_json_address(self, platform):
+        return f'{self._get_host()}/flutter_infra/releases/releases_{platform}.json'
+
+    def _parse_properties(self):
+        printI('Checking local properties file...')
+        pro_path = 'flutterw.properties'
+        exist = os.path.exists(pro_path)
+        if not exist:
+            raise Exception(f"Local properties file not found, should be => {pro_path}")
+        with open(pro_path, mode='r', encoding='utf-8') as f:
+            line_no = 0
+            for line in f.readlines():
+                line_no += 1
+                line = line.replace('\n', '')
+                if line.strip() == "" or line.startswith('#'):
+                    continue
+                kv = line.split('=')
+                if kv is None or len(kv) != 2:
+                    raise Exception(f"Wrong file format in line:{line_no}, should be [key]=[value]")
+                self.cfgs[kv[0]] = kv[1]
+        if self.SDK_KEY not in self.cfgs:
+            raise Exception(f'Did you declared the SDK version in properties? its key is {self.SDK_KEY}')
+        printI(f'You mean u wanna use flutter verison: {self.cfgs[self.SDK_KEY]}')
+
+    def _auto_detect_current_platform(self):
+        # only support mac for now
+        return 'macos'
+
+    def _fetch_flutter_sdk_list(self):
+        printI('Fetching all flutter sdk version from network...')
+        r = urllib.request.Request(self._get_version_json_address(self._auto_detect_current_platform()),
+                                   headers={'Content-Type': 'application/json'})
+        response = urllib.request.urlopen(r, timeout=10)
+        resp_json = response.read().decode('utf8')
+        resp_bean = json.loads(resp_json)
+        if resp_bean is None:
+            raise Exception(
+                'Cannot fetch the remote sdk list, please check your network connection. OR maybe you want set '
+                'cn=true if you r in China.')
+        return resp_bean['releases']
+
+    def _ensure_local_right(self):
+        sdk_list = self._fetch_flutter_sdk_list()
+        download_url = None
+        verify_code = None
+        for sdk in sdk_list:
+            if self.cfgs[self.SDK_KEY] == sdk['version']:
+                channel = sdk['channel']
+                if channel != 'stable':
+                    printI(f'The version u want is in channel >>> [{channel}], but not STABLE.')
+                download_url = self._get_download_address(channel,
+                                                          self._auto_detect_current_platform(), sdk["version"])
+                printI(
+                    f'Going to download {download_url} ...')
+                verify_code = sdk['sha256']
+                break
+        if download_url is None:
+            raise Exception('Can not get the right download url, r u sure it\'s a right version?')
+        file_path = Downloader(download_url, verify_code).download()
+        if file_path is None:
+            raise Exception('Download error...')
+        printD(f'Path is ===>>> {file_path}')
+        self._exact_zip_to_local(file_path)
+
+    def _exact_zip_to_local(self, input_file_path):
+        self._ensure_local_wrapper_dir()
+        target_ver = self.cfgs[self.SDK_KEY]
+        target_file = f'{self.wrapper_home}/{target_ver}'
+        if os.path.exists(target_file):
+            printD('Why wrapper dir already exist???')
+            if os.path.isdir(target_file):
+                os.removedirs(target_file)
+            else:
+                os.remove(target_file)
+        os.makedirs(target_file)
+        printD(f'Prepare unzip the file {input_file_path} into {target_file}')
+        if is_zipfile(input_file_path) is False:
+            raise Exception(f'File {input_file_path} should be a ZIP file.')
+        with ZipFileWithPerms(input_file_path, 'r') as zf:
+            zf.extractall(target_file)
+        printD('Unzip finished.')
+        if self._try_get_local_exist_wrapper():
+            self._delegate_run()
+        else:
+            raise Exception('Unlikely reached.')
+
+    def _ensure_local_wrapper_dir(self):
+        if os.path.exists(self.wrapper_home) is False:
+            raise Exception(f'Local wrapper dir not exist, it should be {self.wrapper_home}')
+
+    def _try_get_local_exist_wrapper(self):
+        printI('Try find local exist wrapper...')
+        self._ensure_local_wrapper_dir()
+        target_ver = self.cfgs[self.SDK_KEY]
+        wrapper_path = f'{self.wrapper_home}/{target_ver}/flutter'
+        if os.path.exists(wrapper_path) is False:
+            return False
+        if os.path.isfile(wrapper_path):
+            raise Exception(f'Local wrapper {wrapper_path} should be dir, but now is a File.')
+        version_file = f'{wrapper_path}/version'
+        bin_file = f'{wrapper_path}/bin/flutter'
+        if os.path.isfile(version_file):
+            with open(version_file, 'r', encoding='utf-8') as vf:
+                ver_str = vf.readline()
+                if ver_str != target_ver:
+                    return False
+        if os.path.isfile(bin_file) and os.access(bin_file, os.X_OK):
+            self.FOUNDED_FLUTTER_BIN = bin_file
+            printI(f'Local wrapper exist in {wrapper_path}, will use it.')
+            return True
+        return False
+
+    def _try_get_local_flutter_version(self) -> (bool, str, str):
+        printI('Confirm local flutter directory and version...')
+        try:
+            with subprocess.Popen(args=['which', 'flutter'], stdout=subprocess.PIPE, bufsize=1024) as p:
+                flutter_dir = None
+                count = 0
+                for line in p.stdout:
+                    count += 1
+                if count == 0:
+                    return False, None, None
+                if count > 1:
+                    raise Exception('Wrong return while run cmd: which flutter')
+                else:
+                    full_path = str(line, encoding='utf-8').replace('\n', '')
+                    r = re.compile(r'(.+)/bin/flutter')
+                    try:
+                        flutter_dir = r.search(full_path).group(1)
+                    except IndexError:
+                        raise Exception('Cant find local flutter directory.')
+            if flutter_dir is None:
+                return False, None, None
+            with open(f'{flutter_dir}/version', mode='r', encoding='utf-8') as version_file:
+                version = version_file.readline()
+            if version is None:
+                raise Exception('Cant get the right version data.')
+            printI('Local flutter in $PATH exist, try to use it.')
+            return True, version, full_path
+        except:
+            printI('CMD run failed.')
+            return False, None
+
+    def delegate_run(self):
+        # 1. 解析配置文件
+        self._parse_properties()
+        # 2. 检查本地是否有
+        exist, version, path = self._try_get_local_flutter_version()
+        if exist is False or version != self.cfgs[self.SDK_KEY]:
+            # 2.2 无则下载到本地.flutterw文件中进行wrapper处理
+            # 本地不存在
+            if exist is False:
+                printI(f'Can not find any valid flutter in your local.')
+            else:
+                printI(f'Your local flutter version is {version}, NOT MATCH')
+            success = self._try_get_local_exist_wrapper()
+            if success:
+                self._delegate_run()
+            else:
+                self._ensure_local_right()
+        else:
+            # 2.1 有则透传执行
+            self.FOUNDED_FLUTTER_BIN = path
+            self._delegate_run()
+
+    def _delegate_run(self):
+        print('')
+        parameters = ' '.join(self.payload)
+        cmd = f'{self.FOUNDED_FLUTTER_BIN} {parameters}'
+        printD(f'Run command >>> {cmd}')
+        os.system(cmd)
+
+
+if __name__ == '__main__':
+    payload = sys.argv[1:]
+    Wrapper(payload).delegate_run()
