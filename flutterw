@@ -29,7 +29,21 @@ from zipfile import ZipFile, ZipInfo, is_zipfile
 
 ssl._create_default_https_context = ssl._create_unverified_context
 
-IS_DEBUG = False
+IS_DEBUG = True
+
+SHOW_PATH = '--show-path'
+SHOW_LOCAL_VALID = '--show-local'
+LIST_VERSION = '--show-list'
+CURRENT_VALID = '--current'
+SWITCH_VER = '--switch-ver'
+
+SUPPORT_ARGS = [
+    SHOW_PATH,
+    SHOW_LOCAL_VALID,
+    LIST_VERSION,
+    CURRENT_VALID,
+    SWITCH_VER
+]
 
 
 class ZipFileWithPerms(ZipFile):
@@ -144,7 +158,9 @@ class Wrapper:
         return f'{self._get_host()}/flutter_infra/releases/{channel}/{platform}/flutter_{platform}_{version}-{channel}.zip'
 
     def _get_version_json_address(self, platform):
-        return f'{self._get_host()}/flutter_infra/releases/releases_{platform}.json'
+        url = f'{self._get_host()}/flutter_infra/releases/releases_{platform}.json'
+        printD(f'URL->{url}')
+        return url
 
     def _parse_properties(self):
         printI('Checking local properties file...')
@@ -286,7 +302,32 @@ class Wrapper:
             printI('CMD run failed.')
             return False, None
 
-    def delegate_run(self):
+    def parse_args(self, argv):
+        argc = len(argv)
+        if argc == 0:
+            printI(f'''Just use flutterw as flutter to run cli with some official parameters, and flutterw also 
+            support some other parameters:\n{",".join(SUPPORT_ARGS)}''')
+        else:
+            first_arg = argv[0]
+            if first_arg in SUPPORT_ARGS:
+                printD('Hit custom parameters logic...')
+                filter_channel = None
+                if len(argv) > 1:
+                    filter_channel = argv[1]
+                if first_arg == LIST_VERSION:
+                    printI('Fetching valid flutter sdk list:')
+                    sdk_list = self._fetch_flutter_sdk_list()
+                    for sdk in sdk_list:
+                        if filter_channel:
+                            if sdk['channel'] == filter_channel:
+                                print(f"{sdk['version']}[{sdk['channel']}]")
+                        else:
+                            print(f"{sdk['version']}[{sdk['channel']}]")
+
+            else:
+                self._delegate_run()
+
+    def _delegate_run(self):
         # 1. 解析配置文件
         self._parse_properties()
         # 2. 检查本地是否有
@@ -308,7 +349,7 @@ class Wrapper:
             self.FOUNDED_FLUTTER_BIN = path
             self._delegate_run()
 
-    def _delegate_run(self):
+    def _delegate_run_real(self):
         print('')
         parameters = ' '.join(self.payload)
         cmd = f'{self.FOUNDED_FLUTTER_BIN} {parameters}'
@@ -318,4 +359,4 @@ class Wrapper:
 
 if __name__ == '__main__':
     payload = sys.argv[1:]
-    Wrapper(payload).delegate_run()
+    Wrapper(payload).parse_args(payload)
